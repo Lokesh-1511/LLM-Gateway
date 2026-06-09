@@ -5,3 +5,5 @@ python-dotenv
 presidio-analyzer
 presidio-anonymizer
 spacy
+chromadb
+sentence-transformers

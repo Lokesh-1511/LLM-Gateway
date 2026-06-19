@@ -1,6 +1,7 @@
 import time
 import tiktoken
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from proxy_service import forward_to_groq
 from security_service import PIIFirewall
@@ -12,6 +13,15 @@ app = FastAPI(
     title="PromptOps Gateway",
     description="Enterprise LLM Gateway Pass-Through Proxy",
     version="1.0.0"
+)
+
+# Enable CORS for the frontend dashboard
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, replace with specific frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Initialize the PII Firewall once when the app starts

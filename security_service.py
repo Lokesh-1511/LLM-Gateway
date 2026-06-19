@@ -15,12 +15,13 @@ class PIIFirewall:
         # The specific entities we want to detect based on requirements
         self.entities_to_detect = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD"]
 
-    def scrub_text(self, text: str) -> str:
+    def scrub_text(self, text: str) -> tuple[str, bool]:
         """
         Scans text for PII and replaces it with placeholders.
+        Returns a tuple: (anonymized_text, was_pii_detected)
         """
         if not text:
-            return text
+            return text, False
             
         # 1. Analyze the text to find PII
         results = self.analyzer.analyze(
@@ -31,7 +32,7 @@ class PIIFirewall:
         
         # 2. If no PII is found, return the original text
         if not results:
-            return text
+            return text, False
             
         # 3. Log that PII was found
         detected_types = set([result.entity_type for result in results])
@@ -43,4 +44,4 @@ class PIIFirewall:
             analyzer_results=results
         )
         
-        return anonymized_result.text
+        return anonymized_result.text, True

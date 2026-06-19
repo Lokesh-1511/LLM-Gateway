@@ -5,7 +5,8 @@ from fastapi.concurrency import run_in_threadpool
 from proxy_service import forward_to_groq
 from security_service import PIIFirewall
 from cache_service import SemanticCache
-from database import log_request
+from database import log_request, SessionLocal, RequestLog
+from sqlalchemy import func
 
 app = FastAPI(
     title="PromptOps Gateway",
@@ -106,6 +107,48 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     
     # Return the target LLM API's response back to the client
     return response
+
+@app.get("/api/analytics/summary")
+async def get_analytics_summary():
+    """
+    Returns aggregated analytics from the database.
+    """
+    db = SessionLocal()
+    try:
+        total_requests = db.query(RequestLog).count()
+        total_pii_blocked = db.query(RequestLog).filter(RequestLog.was_pii_detected == True).count()
+        
+        tokens_saved = db.query(func.sum(RequestLog.token_count)).filter(RequestLog.was_cache_hit == True).scalar()
+        if tokens_saved is None:
+            tokens_saved = 0
+            
+        total_savings = tokens_saved * 0.000002
+        
+        recent_logs_query = db.query(RequestLog).order_by(RequestLog.timestamp.desc()).limit(10).all()
+        recent_logs = [
+            {
+                "id": log.id,
+                "timestamp": log.timestamp.isoformat(),
+                "original_prompt": log.original_prompt,
+                "was_pii_detected": log.was_pii_detected,
+                "was_cache_hit": log.was_cache_hit,
+                "token_count": log.token_count,
+                "latency_ms": log.latency_ms,
+                "estimated_cost": log.estimated_cost
+            }
+            for log in recent_logs_query
+        ]
+        
+        return {
+            "total_requests": total_requests,
+            "total_pii_blocked": total_pii_blocked,
+            "total_savings": total_savings,
+            "recent_logs": recent_logs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     import uvicorn

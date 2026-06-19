@@ -6,6 +6,7 @@ venv/
 
 # Markdown files
 *.md
+!README.md
 
 # Python
 __pycache__/

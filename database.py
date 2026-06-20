@@ -3,8 +3,9 @@ import uuid
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, String, Boolean, Integer, Float, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models import Base, RequestLog
 
 # Load environment variables
 load_dotenv()
@@ -12,22 +13,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 logger = logging.getLogger("Database")
 logger.setLevel(logging.INFO)
-
-# Define the SQLAlchemy Base
-Base = declarative_base()
-
-# Define the RequestLog Table
-class RequestLog(Base):
-    __tablename__ = 'request_logs'
-
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    original_prompt = Column(String)
-    was_pii_detected = Column(Boolean, default=False)
-    was_cache_hit = Column(Boolean, default=False)
-    token_count = Column(Integer, default=0)
-    latency_ms = Column(Float, default=0.0)
-    estimated_cost = Column(Float, default=0.0)
 
 # Create engine and session
 # Check if DATABASE_URL is set, otherwise use a local sqlite fallback for safety or raise an error
@@ -45,7 +30,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base.metadata.create_all(bind=engine)
 logger.info("Database initialized and RequestLog table verified.")
 
-def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float):
+def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None):
     """
     Saves the request details to the database. This function is synchronous and should be called via BackgroundTasks.
     """
@@ -57,7 +42,9 @@ def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: boo
             was_cache_hit=was_cache_hit,
             token_count=token_count,
             latency_ms=latency_ms,
-            estimated_cost=estimated_cost
+            estimated_cost=estimated_cost,
+            user_id=user_id,
+            department_id=department_id
         )
         db.add(new_log)
         db.commit()

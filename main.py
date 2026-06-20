@@ -1,12 +1,18 @@
 import time
 import tiktoken
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+from datetime import timedelta
+
 from proxy_service import forward_to_groq
 from security_service import PIIFirewall
 from cache_service import SemanticCache
-from database import log_request, SessionLocal, RequestLog
+from database import log_request, SessionLocal
+from models import RequestLog, User
+from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
 from sqlalchemy import func
 
 app = FastAPI(
@@ -29,8 +35,23 @@ firewall = PIIFirewall()
 # Initialize the Semantic Cache
 cache = SemanticCache()
 
+@app.post("/api/auth/login")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.id, "department_id": user.department_id, "role": user.role}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/v1/chat/completions")
-async def proxy_chat_completions(request: Request, background_tasks: BackgroundTasks):
+async def proxy_chat_completions(request: Request, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
     """
     Intercepts POST requests to /v1/chat/completions and proxies them to the target LLM API.
     """
@@ -82,7 +103,9 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
             was_cache_hit=True,
             token_count=token_count,
             latency_ms=latency_ms,
-            estimated_cost=0.0 # Cache hits cost us nothing
+            estimated_cost=0.0, # Cache hits cost us nothing
+            user_id=current_user.id,
+            department_id=current_user.department_id
         )
         return cached_response
     # ---------------------------------
@@ -107,7 +130,9 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         was_cache_hit=False,
         token_count=token_count,
         latency_ms=latency_ms,
-        estimated_cost=estimated_cost
+        estimated_cost=estimated_cost,
+        user_id=current_user.id,
+        department_id=current_user.department_id
     )
     
     # --- PHASE 3: ADD TO CACHE ---

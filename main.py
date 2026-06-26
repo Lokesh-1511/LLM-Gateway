@@ -7,8 +7,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import timedelta
 
+import copy
 from proxy_service import forward_to_groq
-from security_service import PIIFirewall
+from security_service import StatefulPIIFirewall
 from cache_service import SemanticCache
 from database import log_request, SessionLocal
 from models import RequestLog, User
@@ -31,7 +32,7 @@ app.add_middleware(
 )
 
 # Initialize the PII Firewall once when the app starts
-firewall = PIIFirewall()
+firewall = StatefulPIIFirewall()
 # Initialize the Semantic Cache
 cache = SemanticCache()
 
@@ -67,12 +68,13 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     # Intercept the messages and scrub PII before forwarding
     full_prompt = ""
     any_pii_detected = False
+    session_map = {}
     if "messages" in body and isinstance(body["messages"], list):
         for message in body["messages"]:
             if "content" in message and isinstance(message["content"], str):
                 original_content = message["content"]
                 # Pass the user's prompt through the firewall
-                scrubbed_content, pii_detected = await run_in_threadpool(firewall.scrub_text, original_content)
+                scrubbed_content, pii_detected, session_map = await run_in_threadpool(firewall.scrub_text, original_content, session_map)
                 message["content"] = scrubbed_content
                 any_pii_detected = any_pii_detected or pii_detected
                 # Concatenate all messages into a single prompt string for caching
@@ -107,6 +109,13 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
             user_id=current_user.id,
             department_id=current_user.department_id
         )
+        
+        # Unmask the cached response before returning
+        if session_map and "choices" in cached_response:
+            for choice in cached_response["choices"]:
+                if "message" in choice and "content" in choice["message"] and isinstance(choice["message"]["content"], str):
+                    choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], session_map)
+                    
         return cached_response
     # ---------------------------------
     
@@ -137,7 +146,16 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     
     # --- PHASE 3: ADD TO CACHE ---
     # Save the sanitized prompt and the response to the cache in the background
-    background_tasks.add_task(cache.add_to_cache, full_prompt, response)
+    # Deepcopy to ensure the cache stores the masked version
+    background_tasks.add_task(cache.add_to_cache, full_prompt, copy.deepcopy(response))
+    # ---------------------------------
+    
+    # --- PHASE 3: UNMASK PII ---
+    # Unmask the LLM response before sending it back to the client
+    if session_map and "choices" in response:
+        for choice in response["choices"]:
+            if "message" in choice and "content" in choice["message"] and isinstance(choice["message"]["content"], str):
+                choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], session_map)
     # ---------------------------------
     
     # Return the target LLM API's response back to the client

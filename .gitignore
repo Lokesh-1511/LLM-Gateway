@@ -7,7 +7,6 @@ venv/
 # Markdown files
 *.md
 !README.md
-
 # Python
 __pycache__/
 *.py[cod]
@@ -16,3 +15,4 @@ __pycache__/
 # OS generated files
 .DS_Store
 Thumbs.db
+Z_Run_commands

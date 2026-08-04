@@ -12,8 +12,9 @@ from proxy_service import forward_to_groq
 from security_service import StatefulPIIFirewall
 from cache_service import SemanticCache
 from database import log_request, SessionLocal
-from models import RequestLog, User
-from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
+from models import RequestLog, User, Chat, Message, Department
+from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, get_password_hash
+from pydantic import BaseModel
 from sqlalchemy import func
 
 app = FastAPI(
@@ -51,8 +52,43 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    department_id: str
+
+@app.get("/api/departments")
+async def get_departments(db: Session = Depends(get_db)):
+    return db.query(Department).all()
+
+@app.post("/api/auth/signup")
+async def signup(req: SignupRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == req.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    new_user = User(
+        email=req.email,
+        hashed_password=get_password_hash(req.password),
+        department_id=req.department_id
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "User created successfully"}
+
+@app.get("/api/chats")
+async def get_chats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return db.query(Chat).filter(Chat.user_id == current_user.id).order_by(Chat.created_at.desc()).all()
+
+@app.get("/api/chats/{chat_id}/messages")
+async def get_chat_messages(chat_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    chat = db.query(Chat).filter(Chat.id == chat_id, Chat.user_id == current_user.id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.asc()).all()
+
 @app.post("/v1/chat/completions")
-async def proxy_chat_completions(request: Request, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user)):
+async def proxy_chat_completions(request: Request, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Intercepts POST requests to /v1/chat/completions and proxies them to the target LLM API.
     """
@@ -62,19 +98,34 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
         
+    chat_id = request.headers.get("x-chat-id")
+    target_tier = request.headers.get("x-model-target", "Fast (8B)")
+    
+    if not chat_id or chat_id == "null":
+        new_chat = Chat(user_id=current_user.id, title="New Chat")
+        db.add(new_chat)
+        db.commit()
+        db.refresh(new_chat)
+        chat_id = new_chat.id
+        
+    user_message = body.get("messages", [])[-1].get("content", "") if body.get("messages") else ""
+    if user_message:
+        db.add(Message(chat_id=chat_id, role="user", content=user_message))
+        db.commit()
+
+        
     start_time = time.time()
     
     # --- PHASE 2: SECURITY MODULE ---
     # Intercept the messages and scrub PII before forwarding
     full_prompt = ""
     any_pii_detected = False
-    session_map = {}
     if "messages" in body and isinstance(body["messages"], list):
         for message in body["messages"]:
             if "content" in message and isinstance(message["content"], str):
                 original_content = message["content"]
                 # Pass the user's prompt through the firewall
-                scrubbed_content, pii_detected, session_map = await run_in_threadpool(firewall.scrub_text, original_content, session_map)
+                scrubbed_content, pii_detected = await run_in_threadpool(firewall.mask_pii, original_content, str(chat_id), db)
                 message["content"] = scrubbed_content
                 any_pii_detected = any_pii_detected or pii_detected
                 # Concatenate all messages into a single prompt string for caching
@@ -111,16 +162,16 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         )
         
         # Unmask the cached response before returning
-        if session_map and "choices" in cached_response:
+        if "choices" in cached_response:
             for choice in cached_response["choices"]:
                 if "message" in choice and "content" in choice["message"] and isinstance(choice["message"]["content"], str):
-                    choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], session_map)
+                    choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], str(chat_id), db)
                     
         return cached_response
     # ---------------------------------
     
     # Forward the parsed (and now scrubbed) JSON to our proxy service
-    response = await forward_to_groq(body)
+    response = await forward_to_groq(body, target_tier)
     
     latency_ms = (time.time() - start_time) * 1000
     
@@ -152,14 +203,25 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     
     # --- PHASE 3: UNMASK PII ---
     # Unmask the LLM response before sending it back to the client
-    if session_map and "choices" in response:
+    unmasked_response_content = ""
+    if "choices" in response:
         for choice in response["choices"]:
             if "message" in choice and "content" in choice["message"] and isinstance(choice["message"]["content"], str):
-                choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], session_map)
+                choice["message"]["content"] = firewall.unmask_response(choice["message"]["content"], str(chat_id), db)
+                unmasked_response_content += choice["message"]["content"]
     # ---------------------------------
     
-    # Return the target LLM API's response back to the client
-    return response
+    # Save the assistant's response to the database
+    if unmasked_response_content:
+        db.add(Message(chat_id=chat_id, role="assistant", content=unmasked_response_content))
+        db.commit()
+    
+    # Add chat_id to the response headers so the frontend can update its URL/state
+    headers = {"X-Chat-Id": str(chat_id)}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=response, headers=headers)
+    
+
 
 @app.get("/api/analytics/summary")
 async def get_analytics_summary():

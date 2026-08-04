@@ -3,8 +3,9 @@ import uuid
 import logging
 from datetime import datetime
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
 from models import Base, RequestLog
 
 # Load environment variables
@@ -23,12 +24,26 @@ if not DATABASE_URL:
 # We use check_same_thread=False for SQLite if it's the fallback
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Create the tables if they don't exist
-Base.metadata.create_all(bind=engine)
-logger.info("Database initialized and RequestLog table verified.")
+# Try to connect and create tables, if it fails, fallback to sqlite
+try:
+    if engine.dialect.name == 'postgresql':
+        with engine.connect() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+            conn.commit()
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database initialized and tables verified.")
+except OperationalError as e:
+    logger.error(f"Failed to connect to primary database: {e}")
+    logger.warning("Falling back to local sqlite database (llm_logs.db).")
+    DATABASE_URL = "sqlite:///./llm_logs.db"
+    connect_args = {"check_same_thread": False}
+    engine = create_engine(DATABASE_URL, connect_args=connect_args)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    logger.info("Local SQLite database initialized and tables verified.")
 
 def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None):
     """

@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import Column, String, Boolean, Integer, Float, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
+from pgvector.sqlalchemy import Vector
 
 Base = declarative_base()
 
@@ -39,3 +40,45 @@ class RequestLog(Base):
 
     user = relationship("User")
     department = relationship("Department")
+
+class Chat(Base):
+    __tablename__ = 'chats'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey('users.id'))
+    title = Column(String, default="New Chat")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
+    pii_mappings = relationship("PIIMapping", back_populates="chat", cascade="all, delete-orphan")
+
+class Message(Base):
+    __tablename__ = 'messages'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    chat_id = Column(String(36), ForeignKey('chats.id'))
+    role = Column(String) # "user" or "assistant"
+    content = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    chat = relationship("Chat", back_populates="messages")
+
+class PIIMapping(Base):
+    __tablename__ = 'pii_mappings'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    chat_id = Column(String(36), ForeignKey("chats.id"))
+    real_value = Column(String, index=True)
+    fake_value = Column(String, index=True)
+
+    chat = relationship("Chat", back_populates="pii_mappings")
+
+class PromptCache(Base):
+    __tablename__ = 'prompt_cache'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    prompt_text = Column(String)
+    embedding = Column(Vector(384))
+    response_json = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -94,6 +94,12 @@ export default function ChatPortal({ token, onLogout }) {
         return;
       }
 
+      if (res.status === 403) {
+        const errorData = await res.json();
+        alert(`🚨 Request Blocked: ${errorData.detail || 'Policy Violation Detected'}`);
+        return;
+      }
+
       if (res.ok) {
         const data = await res.json();
         const returnedChatId = res.headers.get('X-Chat-Id');

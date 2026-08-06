@@ -1,7 +1,7 @@
 import logging
 import re
 from sqlalchemy.orm import Session
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer
 from faker import Faker
 from models import PIIMapping
 
@@ -14,6 +14,21 @@ class StatefulPIIFirewall:
         # Initialize the engine. This loads the underlying NLP models (like spaCy)
         self.analyzer = AnalyzerEngine()
         self.faker = Faker()
+        
+        # Add custom recognizer for short phone numbers (e.g., 555-0100)
+        phone_pattern = Pattern(name="short_phone", regex=r"\b\d{3}-\d{4}\b", score=0.85)
+        short_phone_recognizer = PatternRecognizer(supported_entity="PHONE_NUMBER", patterns=[phone_pattern])
+        self.analyzer.registry.add_recognizer(short_phone_recognizer)
+        
+        # Add custom recognizer for Indian phone numbers (e.g., 9876543210)
+        # Using a low base score of 0.4, but if context words are present, Presidio boosts the score over the 0.5 threshold
+        indian_phone_pattern = Pattern(name="indian_phone", regex=r"\b[6-9]\d{9}\b", score=0.4)
+        indian_phone_recognizer = PatternRecognizer(
+            supported_entity="PHONE_NUMBER", 
+            patterns=[indian_phone_pattern],
+            context=["phone", "ph", "mobile", "mob", "call", "number", "contact", "+91", "91"]
+        )
+        self.analyzer.registry.add_recognizer(indian_phone_recognizer)
         
         # The specific entities we want to detect based on requirements
         self.entities_to_detect = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD"]
@@ -55,20 +70,51 @@ class StatefulPIIFirewall:
         # Also keep track of all used fake_values to prevent collisions
         used_fake_values = {m.fake_value for m in existing_mappings}
         
+        # Extract the faked person name if available for consistent email generation
+        faked_person_name = next((m.fake_value for m in existing_mappings if m.entity_type == "PERSON"), None)
+        
         # 6. Generate fake values for NEW entities and commit them
         new_mappings_added = False
-        for original_value, ent_type in entities.items():
+        # Sort entities so PERSON is processed before EMAIL_ADDRESS
+        sorted_entities = sorted(entities.items(), key=lambda x: 0 if x[1] == "PERSON" else 1)
+        
+        for original_value, ent_type in sorted_entities:
             lower_val = original_value.lower()
             if lower_val not in db_real_to_fake:
-                # Generate a secure bracketed token
-                token_index = 1
-                token = f"[{ent_type}_{token_index}]"
+                # Generate a realistic fake value using Faker
+                token = ""
+                if ent_type == "PERSON":
+                    token = self.faker.name()
+                    if not faked_person_name:
+                        faked_person_name = token
+                elif ent_type == "EMAIL_ADDRESS":
+                    if faked_person_name:
+                        clean_name = re.sub(r'[^a-z0-9.]', '', faked_person_name.replace(" ", ".").lower())
+                        token = f"{clean_name}@{self.faker.free_email_domain()}"
+                    else:
+                        token = self.faker.email()
+                elif ent_type == "PHONE_NUMBER":
+                    token = self.faker.phone_number()
+                elif ent_type == "CREDIT_CARD":
+                    token = self.faker.credit_card_number()
+                else:
+                    token = f"[{ent_type}_{self.faker.uuid4()[:8]}]"
+                    
+                # Ensure no collisions
                 while token in used_fake_values:
-                    token_index += 1
-                    token = f"[{ent_type}_{token_index}]"
+                    if ent_type == "PERSON":
+                        token = self.faker.name()
+                    elif ent_type == "EMAIL_ADDRESS":
+                        token = self.faker.email()
+                    elif ent_type == "PHONE_NUMBER":
+                        token = self.faker.phone_number()
+                    elif ent_type == "CREDIT_CARD":
+                        token = self.faker.credit_card_number()
+                    else:
+                        token = f"[{ent_type}_{self.faker.uuid4()[:8]}]"
                     
                 # Store in db and local tracking
-                new_mapping = PIIMapping(chat_id=chat_id, real_value=original_value, fake_value=token)
+                new_mapping = PIIMapping(chat_id=chat_id, real_value=original_value, fake_value=token, entity_type=ent_type)
                 db.add(new_mapping)
                 new_mappings_added = True
                 

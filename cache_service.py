@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import logging
+import chromadb
 from sqlalchemy import text
 from sentence_transformers import SentenceTransformer
 from database import SessionLocal
@@ -67,3 +68,33 @@ class SemanticCache:
             db.rollback()
         finally:
             db.close()
+
+class PolicyGuardrail:
+    def __init__(self, threshold: float = 0.35):
+        self.threshold = threshold
+        # Initialize chromadb persistent client
+        self.chroma_client = chromadb.PersistentClient(path="./.chroma_db")
+        self.collection = self.chroma_client.get_or_create_collection(name="corporate_policies")
+        logger.info(f"Initialized PolicyGuardrail with threshold {self.threshold}")
+        
+    def check_policy_violation(self, prompt: str) -> tuple[bool, str]:
+        """
+        Checks if the prompt violates any corporate policy.
+        Returns (violation: bool, policy_description: str)
+        """
+        if not prompt.strip():
+            return False, ""
+            
+        results = self.collection.query(
+            query_texts=[prompt],
+            n_results=1
+        )
+        
+        if results and results["distances"] and results["distances"][0]:
+            distance = results["distances"][0][0]
+            if distance < self.threshold:
+                policy_desc = results["documents"][0][0]
+                logger.warning(f"🚨 Policy Violation Detected! Distance: {distance:.4f} Policy: {policy_desc}")
+                return True, policy_desc
+                
+        return False, ""

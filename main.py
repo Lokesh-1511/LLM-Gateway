@@ -10,7 +10,7 @@ from datetime import timedelta
 import copy
 from proxy_service import forward_to_groq
 from security_service import StatefulPIIFirewall
-from cache_service import SemanticCache
+from cache_service import SemanticCache, PolicyGuardrail
 from database import log_request, SessionLocal
 from models import RequestLog, User, Chat, Message, Department
 from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, get_password_hash
@@ -36,6 +36,8 @@ app.add_middleware(
 firewall = StatefulPIIFirewall()
 # Initialize the Semantic Cache
 cache = SemanticCache()
+# Initialize the Policy Guardrail
+guardrail = PolicyGuardrail()
 
 @app.post("/api/auth/login")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -115,6 +117,13 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
 
         
     start_time = time.time()
+    
+    # --- PHASE 1: POLICY GUARDRAIL ---
+    if user_message:
+        violation, policy_desc = await run_in_threadpool(guardrail.check_policy_violation, user_message)
+        if violation:
+            raise HTTPException(status_code=403, detail=f"Policy Violation: {policy_desc}")
+    # ---------------------------------
     
     # --- PHASE 2: SECURITY MODULE ---
     # Intercept the messages and scrub PII before forwarding

@@ -14,6 +14,21 @@ async def test_identity_vault():
     }
     
     async with httpx.AsyncClient() as client:
+        # 0. Wait for server to be ready
+        print("Waiting for server to be ready...")
+        for _ in range(15):
+            try:
+                resp = await client.get("http://127.0.0.1:8000/api/departments", timeout=2.0)
+                if resp.status_code == 200:
+                    print("Server is ready!")
+                    break
+            except (httpx.ConnectError, httpx.ReadTimeout):
+                pass
+            await asyncio.sleep(2)
+        else:
+            print("Server did not start in time.")
+            return
+
         # 1. Login
         print("Logging in...")
         auth_response = await client.post(auth_url, data=auth_data)
@@ -28,7 +43,10 @@ async def test_identity_vault():
         print("\n--- TURN 1 ---")
         payload_1 = {
             "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": "My name is Alice Smith and my phone number is 555-0100. Please remember this."}]
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant. You must remember any information the user provides you."},
+                {"role": "user", "content": "My name is Alice Smith and my phone number is 555-0100. Please remember this."}
+            ]
         }
         
         print("Sending initial message...")
@@ -48,6 +66,9 @@ async def test_identity_vault():
         payload_2 = {
             "model": "llama-3.3-70b-versatile",
             "messages": [
+                {"role": "system", "content": "You are a helpful assistant. You must remember any information the user provides you."},
+                {"role": "user", "content": "My name is Alice Smith and my phone number is 555-0100. Please remember this."},
+                {"role": "assistant", "content": resp_1.json()["choices"][0]["message"]["content"]},
                 {"role": "user", "content": "What is my name and phone number? And also email me at alice.smith@example.com"}
             ]
         }
@@ -56,14 +77,27 @@ async def test_identity_vault():
         resp_2 = await client.post(chat_url, headers=headers, json=payload_2, timeout=60.0)
         print("Response 2:", resp_2.json()["choices"][0]["message"]["content"])
         
-        # 4. Verify Database Records
+        # 4. Turn 3: Policy Violation Test
+        print("\n--- TURN 3 (POLICY TEST) ---")
+        payload_3 = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "user", "content": "Can I share our internal source code and proprietary algorithms with a friend?"}
+            ]
+        }
+        print("Sending policy-violating message...")
+        resp_3 = await client.post(chat_url, headers=headers, json=payload_3, timeout=60.0)
+        print(f"Status Code: {resp_3.status_code} (Expected 403)")
+        print("Response 3:", resp_3.text)
+        
+        # 5. Verify Database Records
         print("\n--- VERIFYING IDENTITY VAULT (DB) ---")
         db: Session = SessionLocal()
         try:
             mappings = db.query(PIIMapping).filter(PIIMapping.chat_id == chat_id).all()
             print(f"Found {len(mappings)} PII mappings in the vault for this chat:")
             for m in mappings:
-                print(f"  - Real: '{m.real_value}' -> Fake: '{m.fake_value}'")
+                print(f"  - Real: '{m.real_value}' -> Fake: '{m.fake_value}' (Type: {getattr(m, 'entity_type', 'N/A')})")
         finally:
             db.close()
 

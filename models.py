@@ -71,6 +71,7 @@ class PIIMapping(Base):
     chat_id = Column(String(36), ForeignKey("chats.id"))
     real_value = Column(String, index=True)
     fake_value = Column(String, index=True)
+    entity_type = Column(String)
 
     chat = relationship("Chat", back_populates="pii_mappings")
 
@@ -82,3 +83,10 @@ class PromptCache(Base):
     embedding = Column(Vector(384))
     response_json = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class Policy(Base):
+    __tablename__ = 'policies'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    category = Column(String)
+    description = Column(String)

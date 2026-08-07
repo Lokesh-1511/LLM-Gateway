@@ -12,6 +12,7 @@ from proxy_service import forward_to_groq
 from security_service import StatefulPIIFirewall
 from cache_service import SemanticCache, PolicyGuardrail
 from database import log_request, SessionLocal
+from routing_service import RoutingEngine
 from models import RequestLog, User, Chat, Message, Department
 from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, get_password_hash
 from pydantic import BaseModel
@@ -38,6 +39,8 @@ firewall = StatefulPIIFirewall()
 cache = SemanticCache()
 # Initialize the Policy Guardrail
 guardrail = PolicyGuardrail()
+# Initialize the Routing Engine
+routing_engine = RoutingEngine()
 
 @app.post("/api/auth/login")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -167,7 +170,9 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
             latency_ms=latency_ms,
             estimated_cost=0.0, # Cache hits cost us nothing
             user_id=current_user.id,
-            department_id=current_user.department_id
+            department_id=current_user.department_id,
+            was_failover_used=False,
+            provider="cache"
         )
         
         # Unmask the cached response before returning
@@ -179,10 +184,41 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         return cached_response
     # ---------------------------------
     
-    # Forward the parsed (and now scrubbed) JSON to our proxy service
-    response = await forward_to_groq(body, target_tier)
+    # --- PHASE 4: PREDICTIVE ROUTING & FAILOVER ---
+    user_dept = "Unknown"
+    if current_user.department_id:
+        dept = db.query(Department).filter(Department.id == current_user.department_id).first()
+        if dept:
+            user_dept = dept.name
+            
+    target_model = routing_engine.select_model(user_dept)
+    was_failover_used = (target_model == routing_engine.FALLBACK_MODEL)
+    provider_used = target_model
     
-    latency_ms = (time.time() - start_time) * 1000
+    try:
+        response = await forward_to_groq(body, target_model=target_model)
+        latency_ms = (time.time() - start_time) * 1000
+        routing_engine.record_metric(target_model, latency_ms, 200)
+    except HTTPException as e:
+        latency_ms = (time.time() - start_time) * 1000
+        routing_engine.record_metric(target_model, latency_ms, e.status_code)
+        
+        if target_model == routing_engine.PRIMARY_MODEL:
+            # Retry with fallback model
+            target_model = routing_engine.FALLBACK_MODEL
+            was_failover_used = True
+            provider_used = target_model
+            try:
+                response = await forward_to_groq(body, target_model=target_model)
+                latency_ms = (time.time() - start_time) * 1000
+                routing_engine.record_metric(target_model, latency_ms, 200)
+            except HTTPException as e_fallback:
+                latency_ms = (time.time() - start_time) * 1000
+                routing_engine.record_metric(target_model, latency_ms, e_fallback.status_code)
+                raise e_fallback
+        else:
+            raise e
+    # ---------------------------------
     
     # Extract total tokens from Groq response
     token_count = 0
@@ -201,7 +237,9 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         latency_ms=latency_ms,
         estimated_cost=estimated_cost,
         user_id=current_user.id,
-        department_id=current_user.department_id
+        department_id=current_user.department_id,
+        was_failover_used=was_failover_used,
+        provider=provider_used
     )
     
     # --- PHASE 3: ADD TO CACHE ---

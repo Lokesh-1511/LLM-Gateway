@@ -34,6 +34,8 @@ class RequestLog(Base):
     token_count = Column(Integer, default=0)
     latency_ms = Column(Float, default=0.0)
     estimated_cost = Column(Float, default=0.0)
+    was_failover_used = Column(Boolean, default=False)
+    provider = Column(String, default="")
     
     user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     department_id = Column(String(36), ForeignKey('departments.id'), nullable=True)

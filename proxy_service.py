@@ -9,17 +9,13 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
-async def forward_to_groq(request_body: dict, target_tier: str = None) -> dict:
+async def forward_to_groq(request_body: dict, target_model: str = None) -> dict:
     """
     Forwards the chat completion request to the Groq API.
     """
-    if target_tier == "Fast (8B)":
-        request_body["model"] = "llama-3.1-8b-instant" 
-    elif target_tier == "Balanced (70B)":
-        request_body["model"] = "llama-3.3-70b-versatile"
-    elif target_tier == "Premium (405B)":
-        request_body["model"] = "llama-3.1-405b-reasoning"
-    else:
+    if target_model:
+        request_body["model"] = target_model
+    elif "model" not in request_body:
         request_body["model"] = "llama-3.1-8b-instant"
     if not GROQ_API_KEY:
         raise HTTPException(
@@ -38,7 +34,7 @@ async def forward_to_groq(request_body: dict, target_tier: str = None) -> dict:
     url = f"{GROQ_BASE_URL}/chat/completions"
     if url.endswith("/chat/completions/chat/completions"):
         url = url.replace("/chat/completions/chat/completions", "/chat/completions")
-
+    
     async with httpx.AsyncClient() as client:
         try:
             # Forward the request body exactly as received

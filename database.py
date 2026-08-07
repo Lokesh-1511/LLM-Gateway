@@ -45,7 +45,7 @@ except OperationalError as e:
     Base.metadata.create_all(bind=engine)
     logger.info("Local SQLite database initialized and tables verified.")
 
-def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None):
+def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None, was_failover_used: bool = False, provider: str = ""):
     """
     Saves the request details to the database. This function is synchronous and should be called via BackgroundTasks.
     """
@@ -58,6 +58,8 @@ def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: boo
             token_count=token_count,
             latency_ms=latency_ms,
             estimated_cost=estimated_cost,
+            was_failover_used=was_failover_used,
+            provider=provider,
             user_id=user_id,
             department_id=department_id
         )

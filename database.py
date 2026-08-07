@@ -45,9 +45,10 @@ except OperationalError as e:
     Base.metadata.create_all(bind=engine)
     logger.info("Local SQLite database initialized and tables verified.")
 
-def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None, was_failover_used: bool = False, provider: str = ""):
+def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None, was_failover_used: bool = False, provider: str = "") -> str:
     """
-    Saves the request details to the database. This function is synchronous and should be called via BackgroundTasks.
+    Saves the request details to the database. This function is synchronous and should be called via run_in_threadpool.
+    Returns the string ID of the inserted RequestLog.
     """
     db = SessionLocal()
     try:
@@ -65,9 +66,13 @@ def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: boo
         )
         db.add(new_log)
         db.commit()
+        db.refresh(new_log)
+        log_id = new_log.id
         logger.info(f"💾 Logged request to DB (Cache Hit: {was_cache_hit}, Tokens: {token_count}, Latency: {latency_ms:.2f}ms)")
+        return log_id
     except Exception as e:
         logger.error(f"Failed to log request to DB: {e}")
         db.rollback()
+        return None
     finally:
         db.close()

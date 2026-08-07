@@ -36,6 +36,8 @@ class RequestLog(Base):
     estimated_cost = Column(Float, default=0.0)
     was_failover_used = Column(Boolean, default=False)
     provider = Column(String, default="")
+    shadow_score = Column(Float, nullable=True)
+    potential_savings = Column(Float, default=0.0)
     
     user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     department_id = Column(String(36), ForeignKey('departments.id'), nullable=True)

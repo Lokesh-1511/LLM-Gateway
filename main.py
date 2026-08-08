@@ -15,6 +15,7 @@ from database import log_request, SessionLocal
 from routing_service import RoutingEngine
 from models import RequestLog, User, Chat, Message, Department
 from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, get_password_hash
+from shadow_service import evaluate_migration_potential
 from pydantic import BaseModel
 from sqlalchemy import func
 
@@ -91,6 +92,41 @@ async def get_chat_messages(chat_id: str, db: Session = Depends(get_db), current
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
     return db.query(Message).filter(Message.chat_id == chat_id).order_by(Message.created_at.asc()).all()
+
+async def log_and_evaluate_background(
+    full_prompt: str,
+    any_pii_detected: bool,
+    token_count: int,
+    latency_ms: float,
+    estimated_cost: float,
+    current_user_id: str,
+    current_user_dept: str,
+    was_failover_used: bool,
+    provider_used: str,
+    masked_response_content: str
+):
+    log_id = await run_in_threadpool(
+        log_request,
+        original_prompt=full_prompt,
+        was_pii_detected=any_pii_detected,
+        was_cache_hit=False,
+        token_count=token_count,
+        latency_ms=latency_ms,
+        estimated_cost=estimated_cost,
+        user_id=current_user_id,
+        department_id=current_user_dept,
+        was_failover_used=was_failover_used,
+        provider=provider_used
+    )
+    
+    if log_id:
+        await evaluate_migration_potential(
+            prompt=full_prompt,
+            primary_response=masked_response_content,
+            log_id=log_id,
+            primary_cost=estimated_cost
+        )
+
 
 @app.post("/v1/chat/completions")
 async def proxy_chat_completions(request: Request, background_tasks: BackgroundTasks, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -227,19 +263,25 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         
     estimated_cost = token_count * 0.000002
     
-    # --- PHASE 4: ADD TO DB ---
+    masked_response_content = ""
+    if "choices" in response:
+        for choice in response["choices"]:
+            if "message" in choice and "content" in choice["message"] and isinstance(choice["message"]["content"], str):
+                masked_response_content += choice["message"]["content"]
+
+    # --- PHASE 4 & 5: ADD TO DB & RUN SHADOW EVAL ---
     background_tasks.add_task(
-        log_request,
-        original_prompt=full_prompt,
-        was_pii_detected=any_pii_detected,
-        was_cache_hit=False,
+        log_and_evaluate_background,
+        full_prompt=full_prompt,
+        any_pii_detected=any_pii_detected,
         token_count=token_count,
         latency_ms=latency_ms,
         estimated_cost=estimated_cost,
-        user_id=current_user.id,
-        department_id=current_user.department_id,
+        current_user_id=current_user.id,
+        current_user_dept=current_user.department_id,
         was_failover_used=was_failover_used,
-        provider=provider_used
+        provider_used=provider_used,
+        masked_response_content=masked_response_content
     )
     
     # --- PHASE 3: ADD TO CACHE ---

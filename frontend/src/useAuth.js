@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 
 export function useAuth() {
   const [token, setToken] = useState(localStorage.getItem('access_token'));
+  const [userRole, setUserRole] = useState(localStorage.getItem('user_role'));
 
   useEffect(() => {
     if (token) {
@@ -9,7 +10,13 @@ export function useAuth() {
     } else {
       localStorage.removeItem('access_token');
     }
-  }, [token]);
+    
+    if (userRole) {
+      localStorage.setItem('user_role', userRole);
+    } else {
+      localStorage.removeItem('user_role');
+    }
+  }, [token, userRole]);
 
   const login = async (email, password) => {
     const formData = new URLSearchParams();
@@ -25,6 +32,7 @@ export function useAuth() {
     if (res.ok) {
       const data = await res.json();
       setToken(data.access_token);
+      setUserRole(data.role);
       return true;
     }
     return false;
@@ -46,7 +54,8 @@ export function useAuth() {
 
   const logout = () => {
     setToken(null);
+    setUserRole(null);
   };
 
-  return { token, login, signup, logout };
+  return { token, userRole, login, signup, logout };
 }

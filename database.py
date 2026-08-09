@@ -45,7 +45,7 @@ except OperationalError as e:
     Base.metadata.create_all(bind=engine)
     logger.info("Local SQLite database initialized and tables verified.")
 
-def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None, was_failover_used: bool = False, provider: str = "", original_token_count: int = 0, compressed_token_count: int = 0, tokens_saved_by_compression: int = 0) -> str:
+def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: bool, token_count: int, latency_ms: float, estimated_cost: float, user_id: str = None, department_id: str = None, was_failover_used: bool = False, provider: str = "", original_token_count: int = 0, compressed_token_count: int = 0, tokens_saved_by_compression: int = 0, was_blocked_by_policy: bool = False, policy_violation_reason: str = None) -> str:
     """
     Saves the request details to the database. This function is synchronous and should be called via run_in_threadpool.
     Returns the string ID of the inserted RequestLog.
@@ -56,6 +56,8 @@ def log_request(original_prompt: str, was_pii_detected: bool, was_cache_hit: boo
             original_prompt=original_prompt,
             was_pii_detected=was_pii_detected,
             was_cache_hit=was_cache_hit,
+            was_blocked_by_policy=was_blocked_by_policy,
+            policy_violation_reason=policy_violation_reason,
             token_count=token_count,
             latency_ms=latency_ms,
             estimated_cost=estimated_cost,

@@ -31,6 +31,8 @@ class RequestLog(Base):
     original_prompt = Column(String)
     was_pii_detected = Column(Boolean, default=False)
     was_cache_hit = Column(Boolean, default=False)
+    was_blocked_by_policy = Column(Boolean, default=False)
+    policy_violation_reason = Column(String, nullable=True)
     token_count = Column(Integer, default=0)
     latency_ms = Column(Float, default=0.0)
     estimated_cost = Column(Float, default=0.0)

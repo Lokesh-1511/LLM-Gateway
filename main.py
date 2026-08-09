@@ -57,7 +57,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     access_token = create_access_token(
         data={"sub": user.id, "department_id": user.department_id, "role": user.role}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "role": user.role}
 
 class SignupRequest(BaseModel):
     email: str
@@ -203,6 +203,19 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
     if user_message:
         violation, policy_desc = await run_in_threadpool(guardrail.check_policy_violation, user_message)
         if violation:
+            await run_in_threadpool(
+                log_request,
+                original_prompt=user_message,
+                was_pii_detected=False,
+                was_cache_hit=False,
+                token_count=0,
+                latency_ms=(time.time() - start_time) * 1000,
+                estimated_cost=0.0,
+                user_id=current_user.id,
+                department_id=current_user.department_id,
+                was_blocked_by_policy=True,
+                policy_violation_reason=policy_desc
+            )
             raise HTTPException(status_code=403, detail=f"Policy Violation: {policy_desc}")
     # ---------------------------------
     
@@ -369,33 +382,63 @@ async def get_analytics_summary():
     try:
         total_requests = db.query(RequestLog).count()
         total_pii_blocked = db.query(RequestLog).filter(RequestLog.was_pii_detected == True).count()
+        total_policy_violations = db.query(RequestLog).filter(RequestLog.was_blocked_by_policy == True).count()
+        total_cache_hits = db.query(RequestLog).filter(RequestLog.was_cache_hit == True).count()
         
-        tokens_saved = db.query(func.sum(RequestLog.token_count)).filter(RequestLog.was_cache_hit == True).scalar()
-        if tokens_saved is None:
-            tokens_saved = 0
+        # Calculate money_saved: cache hits + tokens saved by compression
+        cache_savings = db.query(func.sum(RequestLog.token_count)).filter(RequestLog.was_cache_hit == True).scalar() or 0
+        compression_tokens_saved = db.query(func.sum(RequestLog.tokens_saved_by_compression)).scalar() or 0
+        money_saved = (cache_savings + compression_tokens_saved) * 0.000002
+        
+        # Calculate cache hit rate
+        cache_hit_rate = 0.0
+        if total_requests > 0:
+            cache_hit_rate = (total_cache_hits / total_requests) * 100
+        
+        # Calculate savings percentage
+        total_original_tokens = db.query(func.sum(RequestLog.original_token_count)).scalar() or 0
+        total_tokens_saved = compression_tokens_saved
+        savings_percentage = 0.0
+        if total_original_tokens > 0:
+            savings_percentage = (total_tokens_saved / total_original_tokens) * 100
+
+        # Department stats
+        departments = db.query(Department).all()
+        department_stats = []
+        for dept in departments:
+            req_count = db.query(RequestLog).filter(RequestLog.department_id == dept.id).count()
+            viol_count = db.query(RequestLog).filter(RequestLog.department_id == dept.id, RequestLog.was_blocked_by_policy == True).count()
             
-        total_savings = tokens_saved * 0.000002
-        
-        recent_logs_query = db.query(RequestLog).order_by(RequestLog.timestamp.desc()).limit(10).all()
-        recent_logs = [
-            {
-                "id": log.id,
-                "timestamp": log.timestamp.isoformat(),
-                "original_prompt": log.original_prompt,
-                "was_pii_detected": log.was_pii_detected,
-                "was_cache_hit": log.was_cache_hit,
-                "token_count": log.token_count,
-                "latency_ms": log.latency_ms,
-                "estimated_cost": log.estimated_cost
-            }
-            for log in recent_logs_query
-        ]
+            dept_tokens_used = db.query(func.sum(RequestLog.token_count)).filter(RequestLog.department_id == dept.id).scalar() or 0
+            dept_tokens_saved = db.query(func.sum(RequestLog.tokens_saved_by_compression)).filter(RequestLog.department_id == dept.id).scalar() or 0
+            
+            department_stats.append({
+                "department": dept.name,
+                "requests": req_count,
+                "violations": viol_count,
+                "tokens_used": dept_tokens_used,
+                "tokens_saved": dept_tokens_saved
+            })
+            
+        # PII Stats
+        from models import PIIMapping
+        pii_query = db.query(PIIMapping.entity_type, func.count(PIIMapping.id)).group_by(PIIMapping.entity_type).all()
+        pii_stats = [{"name": row[0], "value": row[1]} for row in pii_query]
+            
+        # Recent policy violations
+        recent_violations_query = db.query(RequestLog).filter(RequestLog.was_blocked_by_policy == True).order_by(RequestLog.timestamp.desc()).limit(5).all()
+        recent_violations = [{"prompt": log.original_prompt, "policy": log.policy_violation_reason or "Unknown"} for log in recent_violations_query]
         
         return {
             "total_requests": total_requests,
             "total_pii_blocked": total_pii_blocked,
-            "total_savings": total_savings,
-            "recent_logs": recent_logs
+            "total_policy_violations": total_policy_violations,
+            "cache_hit_rate": cache_hit_rate,
+            "money_saved": money_saved,
+            "savings_percentage": savings_percentage,
+            "department_stats": department_stats,
+            "pii_stats": pii_stats,
+            "recent_violations": recent_violations
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

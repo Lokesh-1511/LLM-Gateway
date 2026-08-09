@@ -23,6 +23,23 @@ class User(Base):
 
     department = relationship("Department")
 
+class AIModel(Base):
+    __tablename__ = 'aimodels'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    display_name = Column(String, index=True)
+    provider_name = Column(String) # e.g. "Groq", "OpenAI"
+    model_id_string = Column(String) # e.g. "llama-3.1-8b-instant"
+    api_key = Column(String)
+    base_url = Column(String)
+    is_active = Column(Boolean, default=True)
+
+class DepartmentModelAccess(Base):
+    __tablename__ = 'department_model_access'
+
+    department_id = Column(String(36), ForeignKey('departments.id'), primary_key=True)
+    aimodel_id = Column(String(36), ForeignKey('aimodels.id'), primary_key=True)
+
 class RequestLog(Base):
     __tablename__ = 'request_logs'
 
@@ -43,9 +60,11 @@ class RequestLog(Base):
     
     user_id = Column(String(36), ForeignKey('users.id'), nullable=True)
     department_id = Column(String(36), ForeignKey('departments.id'), nullable=True)
+    model_id = Column(String(36), ForeignKey('aimodels.id'), nullable=True)
 
     user = relationship("User")
     department = relationship("Department")
+    model = relationship("AIModel")
 
 class Chat(Base):
     __tablename__ = 'chats'
@@ -96,3 +115,11 @@ class Policy(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     category = Column(String)
     description = Column(String)
+
+class SystemConfig(Base):
+    __tablename__ = 'system_configs'
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    key = Column(String, unique=True, index=True)
+    value = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

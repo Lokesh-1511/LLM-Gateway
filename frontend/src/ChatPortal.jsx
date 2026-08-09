@@ -7,12 +7,14 @@ export default function ChatPortal({ token, onLogout }) {
   const [currentChatId, setCurrentChatId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
-  const [targetTier, setTargetTier] = useState('Fast (8B)');
+  const [availableModels, setAvailableModels] = useState([]);
+  const [targetTier, setTargetTier] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef(null);
 
   useEffect(() => {
     fetchChats();
+    fetchAvailableModels();
   }, []);
 
   useEffect(() => {
@@ -57,6 +59,23 @@ export default function ChatPortal({ token, onLogout }) {
       if (res.ok) {
         const data = await res.json();
         setMessages(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchAvailableModels = async () => {
+    try {
+      const res = await fetch('http://127.0.0.1:8000/api/models/available', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableModels(data);
+        if (data.length > 0) {
+          setTargetTier(data[0].id);
+        }
       }
     } catch (err) {
       console.error(err);
@@ -189,9 +208,9 @@ export default function ChatPortal({ token, onLogout }) {
               onChange={e => setTargetTier(e.target.value)}
               className="bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-md py-1 px-2 focus:outline-none focus:ring-1 focus:ring-blue-500"
             >
-              <option value="Fast (8B)">Fast (8B)</option>
-              <option value="Balanced (70B)">Balanced (70B)</option>
-              <option value="Premium (405B)">Premium (405B)</option>
+              {availableModels.map(model => (
+                <option key={model.id} value={model.id}>{model.display_name} ({model.provider_name})</option>
+              ))}
             </select>
           </div>
         </div>

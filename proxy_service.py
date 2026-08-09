@@ -9,29 +9,25 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
-async def forward_to_groq(request_body: dict, target_model: str = None) -> dict:
+async def forward_to_provider(request_body: dict, api_key: str, base_url: str, target_model: str = None) -> dict:
     """
-    Forwards the chat completion request to the Groq API.
+    Forwards the chat completion request to the dynamic upstream API.
     """
     if target_model:
         request_body["model"] = target_model
-    elif "model" not in request_body:
-        request_body["model"] = "llama-3.1-8b-instant"
-    if not GROQ_API_KEY:
+        
+    if not api_key:
         raise HTTPException(
             status_code=500, 
-            detail="GROQ_API_KEY is not configured in the environment."
+            detail="API Key is missing for this model."
         )
     
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
-    # We append /chat/completions in case the base URL doesn't include it. 
-    # If the user passed the full path in GROQ_BASE_URL, we'll need to adjust, 
-    # but normally base url is just the domain or version path.
-    url = f"{GROQ_BASE_URL}/chat/completions"
+    url = f"{base_url}/chat/completions"
     if url.endswith("/chat/completions/chat/completions"):
         url = url.replace("/chat/completions/chat/completions", "/chat/completions")
     

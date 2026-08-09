@@ -13,6 +13,7 @@ from security_service import StatefulPIIFirewall
 from cache_service import SemanticCache, PolicyGuardrail
 from database import log_request, SessionLocal
 from routing_service import RoutingEngine
+from compression_service import compress_prompt
 from models import RequestLog, User, Chat, Message, Department
 from auth_service import get_current_user, get_db, verify_password, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES, get_password_hash
 from shadow_service import evaluate_migration_potential
@@ -103,7 +104,10 @@ async def log_and_evaluate_background(
     current_user_dept: str,
     was_failover_used: bool,
     provider_used: str,
-    masked_response_content: str
+    masked_response_content: str,
+    original_token_count: int = 0,
+    compressed_token_count: int = 0,
+    tokens_saved_by_compression: int = 0
 ):
     log_id = await run_in_threadpool(
         log_request,
@@ -116,7 +120,10 @@ async def log_and_evaluate_background(
         user_id=current_user_id,
         department_id=current_user_dept,
         was_failover_used=was_failover_used,
-        provider=provider_used
+        provider=provider_used,
+        original_token_count=original_token_count,
+        compressed_token_count=compressed_token_count,
+        tokens_saved_by_compression=tokens_saved_by_compression
     )
     
     if log_id:
@@ -157,6 +164,41 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         
     start_time = time.time()
     
+    # --- PHASE 0.5: PROMPT COMPRESSION ---
+    original_token_count = 0
+    compressed_token_count = 0
+    
+    if "messages" in body and isinstance(body["messages"], list):
+        for message in body["messages"]:
+            if "content" in message and isinstance(message["content"], str):
+                try:
+                    encoding = tiktoken.get_encoding("cl100k_base")
+                    orig_tokens = len(encoding.encode(message["content"]))
+                    original_token_count += orig_tokens
+                except Exception:
+                    pass
+                
+                compressed_content, _ = await run_in_threadpool(compress_prompt, message["content"])
+                message["content"] = compressed_content
+                
+                try:
+                    comp_tokens = len(encoding.encode(compressed_content))
+                    compressed_token_count += comp_tokens
+                except Exception:
+                    pass
+                
+                import logging
+                logger = logging.getLogger("uvicorn")
+                logger.info("--- PROMPT COMPRESSION ---")
+                logger.info(f"Compressed To: '{compressed_content}'")
+                logger.info(f"Tokens Saved: {orig_tokens - comp_tokens if 'orig_tokens' in locals() and 'comp_tokens' in locals() else 'Unknown'}")
+                    
+    tokens_saved_by_compression = max(0, original_token_count - compressed_token_count)
+    
+    # Re-extract the user message if it was modified
+    user_message = body.get("messages", [])[-1].get("content", "") if body.get("messages") else ""
+    # -------------------------------------
+
     # --- PHASE 1: POLICY GUARDRAIL ---
     if user_message:
         violation, policy_desc = await run_in_threadpool(guardrail.check_policy_violation, user_message)
@@ -208,7 +250,10 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
             user_id=current_user.id,
             department_id=current_user.department_id,
             was_failover_used=False,
-            provider="cache"
+            provider="cache",
+            original_token_count=original_token_count,
+            compressed_token_count=compressed_token_count,
+            tokens_saved_by_compression=tokens_saved_by_compression
         )
         
         # Unmask the cached response before returning
@@ -281,7 +326,10 @@ async def proxy_chat_completions(request: Request, background_tasks: BackgroundT
         current_user_dept=current_user.department_id,
         was_failover_used=was_failover_used,
         provider_used=provider_used,
-        masked_response_content=masked_response_content
+        masked_response_content=masked_response_content,
+        original_token_count=original_token_count,
+        compressed_token_count=compressed_token_count,
+        tokens_saved_by_compression=tokens_saved_by_compression
     )
     
     # --- PHASE 3: ADD TO CACHE ---
